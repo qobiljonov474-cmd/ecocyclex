@@ -8,9 +8,16 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
-    InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, LabeledPrice,
-    MenuButtonWebApp, Message, PreCheckoutQuery, ReplyKeyboardMarkup,
-    ReplyKeyboardRemove, WebAppInfo,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    LabeledPrice,
+    MenuButtonWebApp,
+    Message,
+    PreCheckoutQuery,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    WebAppInfo,
 )
 from dotenv import load_dotenv
 from supabase import Client, create_client
@@ -27,10 +34,11 @@ sb: Client = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERV
 router = Router()
 
 
-# ---------- Supabase (синхронный клиент → в отдельном потоке) ----------
+# ── Supabase ─────────────────────────────────────────────────────────────
 def _upsert_user(tg_id: int, username: str | None, full_name: str) -> None:
     sb.table("users").upsert(
-        {"tg_id": tg_id, "username": username, "full_name": full_name}, on_conflict="tg_id"
+        {"tg_id": tg_id, "username": username, "full_name": full_name},
+        on_conflict="tg_id",
     ).execute()
 
 
@@ -40,7 +48,7 @@ def _add_premium(tg_id: int, stars: int, charge_id: str, payload: str) -> dateti
     start = now
     if res.data and res.data[0].get("premium_until"):
         cur = datetime.fromisoformat(res.data[0]["premium_until"].replace("Z", "+00:00"))
-        start = max(now, cur)  # продлеваем от конца текущей подписки
+        start = max(now, cur)
     until = start + timedelta(days=PREMIUM_DAYS)
     sb.table("payments").insert(
         {"tg_id": tg_id, "stars": stars, "charge_id": charge_id, "payload": payload}
@@ -67,149 +75,139 @@ def _premium_until(tg_id: int) -> datetime | None:
 
 def _last_listings(n: int = 5) -> list[dict]:
     return (
-        sb.table("listings").select("type,kg,price,place,phone")
-        .order("created_at", desc=True).limit(n).execute().data
+        sb.table("listings")
+        .select("type,kg,price,place,phone")
+        .order("created_at", desc=True)
+        .limit(n)
+        .execute()
+        .data
     )
 
 
-# ---------- Команды ----------
+# ── Клавиатуры и тексты ──────────────────────────────────────────────────
 def app_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="♻️ EcoCycle X ni ochish", web_app=WebAppInfo(url=MINIAPP_URL))
-    ]])
-
-
-WELCOME = (
-    "👋 EcoCycle X platformasiga xush kelibsiz!\n\n"
-    "Uyingizdagi chiqindilarni soting yoki zavod sifatida xarid qiling.\n\n"
-    "Ro'yxatdan o'tish uchun bir marta quyidagi tugma orqali "
-    "telefon raqamingizni yuboring:"
-)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="♻️ EcoCycle X ni ochish", web_app=WebAppInfo(url=MINIAPP_URL))]
+        ]
+    )
 
 
 def phone_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Telefon raqamni yuborish", request_contact=True)]],
+        keyboard=[
+            [KeyboardButton(text="📱 Telefon raqamni yuborish", request_contact=True)]
+        ],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
 
 
-async def send_premium_invoice(message: Message) -> None:
-    await message.answer_invoice(
-        title="EcoCycle X Premium",
-        description=f"{PREMIUM_DAYS} kun: qabul qiluvchilar uchun premium imkoniyatlar.",
-        payload=f"premium_{PREMIUM_DAYS}d",
-        currency="XTR",                 # Telegram Stars
-        prices=[LabeledPrice(label=f"Premium {PREMIUM_DAYS} kun", amount=PREMIUM_STARS)],
-        provider_token="",              # для Stars токен провайдера пустой
-    )
+WELCOME = (
+    "👋 <b>EcoCycle X</b> platformasiga xush kelibsiz!\n\n"
+    "Bu yerda siz uyingizdan chiqqan chiqindi va ikkilamchi xomashyolarni "
+    "(plastik, karton, metall) to'g'ridan-to'g'ri yirik zavodlarga eng yuqori narxlarda sotishingiz mumkin.\n\n"
+    "Ro'yxatdan o'tish uchun quyidagi tugma orqali telefon raqamingizni yuboring:"
+)
+
+REGISTERED_TEXT = (
+    "Ajoyib! Siz <b>EcoCycle X</b> platformasida Sotuvchi sifatida muvaffaqiyatli ro'yxatdan o'tdingiz 🎉\n\n"
+    "Ilovani ishga tushirish uchun pastdagi menyulardan birini bosing 👇"
+)
 
 
+# ── Команды ──────────────────────────────────────────────────────────────
 @router.message(CommandStart())
-async def start(message: Message, command: CommandObject) -> None:
-    u = message.from_user
-    await asyncio.to_thread(_upsert_user, u.id, u.username, u.full_name)
-    if command.args == "premium":
-        await send_premium_invoice(message)
+async def cmd_start(message: Message, command: CommandObject) -> None:
+    user = message.from_user
+    if not user:
         return
-    phone = await asyncio.to_thread(_get_phone, u.id)
-    if phone:
-        await message.answer(
-            "👋 EcoCycle X platformasiga xush kelibsiz!\n\n"
-            "Uyingizdagi chiqindilarni soting yoki zavod sifatida xarid qiling.",
-            reply_markup=app_keyboard(),
-        )
+
+    await asyncio.to_thread(_upsert_user, user.id, user.username, user.full_name)
+    phone = await asyncio.to_thread(_get_phone, user.id)
+
+    if not phone:
+        await message.answer(WELCOME, reply_markup=phone_keyboard(), parse_mode="HTML")
     else:
-        await message.answer(WELCOME, reply_markup=phone_keyboard())
+        await message.answer(REGISTERED_TEXT, reply_markup=app_keyboard(), parse_mode="HTML")
 
 
 @router.message(F.contact)
-async def got_contact(message: Message) -> None:
-    c = message.contact
-    # принимаем только СВОЙ номер, а не пересланный чужой контакт
-    if c.user_id != message.from_user.id:
-        await message.answer("Iltimos, oʻzingizning raqamingizni tugma orqali yuboring.",
-                             reply_markup=phone_keyboard())
+async def handle_contact(message: Message) -> None:
+    user = message.from_user
+    contact = message.contact
+    if not user or not contact:
         return
-    phone = c.phone_number if c.phone_number.startswith("+") else "+" + c.phone_number
-    await asyncio.to_thread(_save_phone, message.from_user.id, phone)
-    await message.answer("✅ Rahmat! Roʻyxatdan oʻtdingiz.", reply_markup=ReplyKeyboardRemove())
-    await message.answer("Ilovani ochish uchun tugmani bosing:", reply_markup=app_keyboard())
+
+    await asyncio.to_thread(_upsert_user, user.id, user.username, user.full_name)
+    await asyncio.to_thread(_save_phone, user.id, contact.phone_number)
+
+    await message.answer("✅ Raqamingiz saqlandi!", reply_markup=ReplyKeyboardRemove())
+    await message.answer(REGISTERED_TEXT, reply_markup=app_keyboard(), parse_mode="HTML")
 
 
 @router.message(Command("premium"))
-async def premium(message: Message) -> None:
-    until = await asyncio.to_thread(_premium_until, message.from_user.id)
-    if until and until > datetime.now(timezone.utc):
-        await message.answer(f"⭐ Premium faol: {until:%d.%m.%Y} gacha. Uzaytirish uchun toʻlang:")
-    await send_premium_invoice(message)
-
-
-@router.message(Command("list"))
-async def last(message: Message) -> None:
-    rows = await asyncio.to_thread(_last_listings)
-    if not rows:
-        await message.answer("Hozircha eʼlonlar yoʻq.")
-        return
-    names = {"pet": "Plastik", "bag": "Paketlar", "glass": "Shisha",
-             "paper": "Qogʻoz", "cap": "Qopqoqlar", "metal": "Metall"}
-    lines = [
-        f"• {names.get(r['type'], r['type'])}, {r['kg']:g} kg — "
-        f"{'bepul' if not r['price'] else str(int(r['price'])) + ' soʻm/kg'} · {r['place']}"
-        for r in rows
-    ]
-    await message.answer("Oxirgi eʼlonlar:\n" + "\n".join(lines), reply_markup=app_keyboard())
-
-
-@router.message(Command("paysupport"))  # Telegram требует эту команду у ботов с платежами
-async def paysupport(message: Message) -> None:
-    await message.answer(
-        "Toʻlov boʻyicha savollar uchun @your_support_username ga yozing "
-        "va toʻlov sanasini koʻrsating."
+async def cmd_premium(message: Message) -> None:
+    await message.answer_invoice(
+        title="EcoCycle X Premium",
+        description=f"{PREMIUM_DAYS} kunlik Premium obuna (ustuvor e'lonlar va kengaytirilgan imkoniyatlar).",
+        payload=f"premium_{PREMIUM_DAYS}d",
+        currency="XTR",
+        prices=[LabeledPrice(label="Premium", amount=PREMIUM_STARS)],
     )
 
 
-# ---------- Оплата Stars ----------
 @router.pre_checkout_query()
-async def pre_checkout(q: PreCheckoutQuery) -> None:
-    await q.answer(ok=q.invoice_payload.startswith("premium_"))
+async def process_pre_checkout(query: PreCheckoutQuery) -> None:
+    await query.answer(ok=True)
 
 
 @router.message(F.successful_payment)
-async def paid(message: Message) -> None:
-    p = message.successful_payment
+async def process_successful_payment(message: Message) -> None:
+    user = message.from_user
+    payment = message.successful_payment
+    if not user or not payment:
+        return
+
     until = await asyncio.to_thread(
-        _add_premium, message.from_user.id, p.total_amount,
-        p.telegram_payment_charge_id, p.invoice_payload,
+        _add_premium,
+        user.id,
+        payment.total_amount,
+        payment.telegram_payment_charge_id,
+        payment.invoice_payload,
     )
-    await message.answer(f"✅ Rahmat! Premium {until:%d.%m.%Y} gacha faol.")
+    await message.answer(
+        f"🌟 Rahmat! <b>EcoCycle X Premium</b> {until.strftime('%d.%m.%Y')} gacha faollashtirildi.",
+        parse_mode="HTML",
+    )
 
 
-async def run_health_server() -> None:
-    """Мини-сервер для Render Web Service: ему нужен открытый порт и ответ на пинг."""
-    async def ok(_request):
-        return web.Response(text="EcoCycle X bot is running")
-
-    app = web.Application()
-    app.router.add_get("/", ok)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", "10000"))).start()
+# ── Запуск (Polling + Healthcheck для хостинга) ──────────────────────────
+async def health(request: web.Request) -> web.Response:
+    return web.Response(text="EcoCycle X bot is running")
 
 
 async def main() -> None:
-    await run_health_server()
-    bot = Bot(BOT_TOKEN)
+    bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
     dp.include_router(router)
-    await bot.set_chat_menu_button(  # кнопка «EcoCycle X mini ilovasi» рядом с полем ввода
-        menu_button=MenuButtonWebApp(text="EcoCycle X mini ilovasi 🌿",
-                                     web_app=WebAppInfo(url=MINIAPP_URL))
+
+    await bot.set_chat_menu_button(
+        menu_button=MenuButtonWebApp(text="EcoCycle X", web_app=WebAppInfo(url=MINIAPP_URL))
     )
+
+    app = web.Application()
+    app.router.add_get("/", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", "8080"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
     asyncio.run(main())
+    
